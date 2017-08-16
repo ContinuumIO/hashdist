@@ -56,13 +56,20 @@ class ProfileFrontendBase(object):
 
     def build_profile_deps(self):
         ready = self.builder.get_ready_list()
-        if len(ready) == 0:
+        conda_current = self.builder.get_conda_current()
+        if len(ready) == 0 and conda_current:
             sys.stdout.write('[Profile dependencies are up to date]\n')
-        else:
-            while len(ready) != 0:
-                self.builder.build(ready[0], self.ctx.get_config(),
-                        self.args.j, self.args.k)
-                ready = self.builder.get_ready_list()
+
+        if not conda_current:
+            self.builder.conda_install(self.conda_specs)
+
+        built_deps = False
+        while len(ready) != 0:
+            self.builder.build(ready[0], self.ctx.get_config(),
+                    self.args.j, self.args.k)
+            ready = self.builder.get_ready_list()
+            built_deps = True
+        if built_deps:
             sys.stdout.write('[Profile dependency build successful]\n')
 
     def ensure_target(self, target):
@@ -104,21 +111,19 @@ class Build(ProfileFrontendBase):
                                self.args.k, self.args.debug)
         else:
             ready = self.builder.get_ready_list()
-            was_done = len(ready) == 0
-            while len(ready) != 0:
-                self.builder.build(ready[0], self.ctx.get_config(), self.args.j,
-                                   self.args.k, self.args.debug)
-                ready = self.builder.get_ready_list()
-            artifact_id, artifact_dir = self.builder.build_profile(self.ctx.get_config())
-            self.build_store.create_symlink_to_artifact(artifact_id, profile_symlink)
-            if was_done:
+            conda_current = self.builder.get_conda_current()
+            if len(ready) == 0 and conda_current:
                 sys.stdout.write('Up to date, link at: %s\n' % profile_symlink)
             else:
+                if not conda_current:
+                    self.builder.conda_install(self.ctx.get_config(), self.args.debug)
                 while len(ready) != 0:
                     self.builder.build(ready[0], self.ctx.get_config(),
-                            self.args.j, self.args.k)
+                                       self.args.j, self.args.k)
                     ready = self.builder.get_ready_list()
                 sys.stdout.write('Profile build successful, link at: %s\n' % profile_symlink)
+            artifact_id, artifact_dir = self.builder.build_profile(self.ctx.get_config())
+            self.build_store.create_symlink_to_artifact(artifact_id, profile_symlink)
 
 @register_subcommand
 class Develop(ProfileFrontendBase):
@@ -182,7 +187,11 @@ class Status(ProfileFrontendBase):
         report = self.builder.get_status_report()
         report = sorted(report.values(), key=lambda tup: tup[0].short_artifact_id.lower())
         for build_spec, is_built in report:
-            status = 'OK' if is_built else 'needs build'
+            if build_spec.short_artifact_id.startswith('conda spec:'):
+                action = 'install/update'
+            else:
+                action = 'build'
+            status = 'OK' if is_built else 'needs ' + action
             sys.stdout.write('%-50s [%s]\n' % (build_spec.short_artifact_id, status))
 
 @register_subcommand

@@ -1,11 +1,15 @@
-import os
 import errno
 import filecmp
+import glob
+import gzip
+import json
+import os
 import shutil
 import time
-import gzip
 from os.path import join as pjoin
 from contextlib import closing, contextmanager
+from tempfile import mkdtemp
+import warnings as _warnings
 
 
 @contextmanager
@@ -136,6 +140,40 @@ def gzip_compress(source_filename, dest_filename):
                 dst.write(chunk)
 
 
+def recursive_symlink(source, dest, top_level_source=None):
+    """symlink only files/folders that don't already exist as files/folders (not symlinks)
+
+    For conda-created envs, we need finer granularity of what we symlink.  Conda hardlinks
+    files into place, and we should leave those, but we want to maintain hashdist symlinking
+    behavior for anything not conda-controlled.
+    """
+    conda_files = set()
+    if not top_level_source:
+        top_level_source = source
+    if os.path.isdir(dest) and not os.path.islink(dest):
+        conda_meta_dir = pjoin(dest, 'conda-meta')
+        if os.path.isdir(conda_meta_dir):
+            for meta_file in glob.glob(pjoin(conda_meta_dir, '*.json')):
+                with open(meta_file) as f:
+                    conda_files.update(json.load(f)['files'])
+        for item in os.listdir(source):
+            source_path = pjoin(source, item)
+            dest_path = pjoin(dest, item)
+            if os.path.isdir(source_path) and os.path.isdir(dest_path):
+                recursive_symlink(source_path, dest_path, top_level_source=top_level_source)
+            elif os.path.isfile(source_path):
+                relative_path = source_path.replace(top_level_source + os.path.sep, '')
+                if os.path.isfile(dest_path) and source_path.replace(relative_path, '') in conda_files:
+                    raise RuntimeError("Conflict between conda-created file ({dest}) "
+                                       "and hashdist file ({src})".format(src=source_path,
+                                                                          dest=dest_path))
+                else:
+                    atomic_symlink(source_path, dest_path)
+            else:
+                atomic_symlink(source_path, dest_path)
+    else:
+        return atomic_symlink(source, dest)
+
 def atomic_symlink(source, dest):
     """Overwrites a destination symlink atomically without raising error
     if target exists (by first creating link to `source`, then renaming it to `dest`)
@@ -209,3 +247,49 @@ def realpath_to_symlink(filename):
     parent_dir, basename = os.path.split(filename)
     result = pjoin(os.path.realpath(parent_dir), basename)
     return result
+
+
+class TemporaryDirectory(object):
+    """Create and return a temporary directory.  This has the same
+    behavior as mkdtemp but can be used as a context manager.  For
+    example:
+
+        with TemporaryDirectory() as tmpdir:
+            ...
+
+    Upon exiting the context, the directory and everything contained
+    in it are removed.
+    """
+
+    # Handle mkdtemp raising an exception
+    name = None
+    _closed = False
+
+    def __init__(self, suffix="", prefix='tmp', dir=None):
+        self.name = mkdtemp(suffix, prefix, dir)
+
+    def __repr__(self):
+        return "<{} {!r}>".format(self.__class__.__name__, self.name)
+
+    def __enter__(self):
+        return self.name
+
+    def cleanup(self, _warn=False, _warnings=_warnings):
+        if self.name and not self._closed:
+            try:
+                shutil.rmtree(self.name)
+            except (TypeError, AttributeError) as ex:
+                if "None" not in '%s' % (ex,):
+                    raise
+                shutil.rmtree(self.name)
+            self._closed = True
+            if _warn and _warnings.warn:
+                _warnings.warn("Implicitly cleaning up {!r}".format(self),
+                                _warnings.ResourceWarning)
+
+    def __exit__(self, exc, value, tb):
+        self.cleanup()
+
+    def __del__(self):
+        # Issue a ResourceWarning if implicit cleanup needed
+        self.cleanup(_warn=True)

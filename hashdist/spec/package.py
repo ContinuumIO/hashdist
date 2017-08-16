@@ -247,6 +247,11 @@ class PackageSpec(object):
                 },
             "sources": sources,
             }
+
+        conda_specs = self.doc.get('conda_env')
+        if conda_specs:
+            build_spec['build']['conda_env'] = conda_specs
+
         return core.BuildSpec(build_spec)
 
     def _postprocess_commands(self):

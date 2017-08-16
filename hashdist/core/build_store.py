@@ -148,10 +148,11 @@ from .common import (InvalidBuildSpecError, BuildFailedError,
                      json_formatting_options, SHORT_ARTIFACT_ID_LEN,
                      working_directory)
 from .fileutils import silent_unlink, robust_rmtree, silent_makedirs, gzip_compress, write_protect
-from .fileutils import rmtree_write_protected, atomic_symlink, realpath_to_symlink, allow_writes
+from .fileutils import rmtree_write_protected, recursive_symlink, realpath_to_symlink, allow_writes
+from .fileutils import TemporaryDirectory
 from . import run_job
 
-from hashdist.util.logger_setup import log_to_file, getLogger
+from hashdist.util.logger_setup import log_to_file, getLogger, capture_to_file
 
 
 class BuildSpec(object):
@@ -313,14 +314,14 @@ class BuildStore(object):
         Returns the path that was removed, or `None` if no path was present.
         """
         name, digest = artifact_id.split('/')
-        path = self._get_artifact_path(name, digest)
+        path = self.get_artifact_path(name, digest)
         if os.path.exists(path):
             rmtree_write_protected(path)
             return path
         else:
             return None
 
-    def _get_artifact_path(self, name, digest):
+    def get_artifact_path(self, name, digest):
         return pjoin(self.artifact_root, name, digest[:SHORT_ARTIFACT_ID_LEN])
 
     def resolve(self, artifact_id):
@@ -328,7 +329,7 @@ class BuildStore(object):
         None if the artifact isn't built.
         """
         name, digest = artifact_id.split('/')
-        path = self._get_artifact_path(name, digest)
+        path = self.get_artifact_path(name, digest)
         if not os.path.exists(path):
             return None
         else:
@@ -373,7 +374,6 @@ class BuildStore(object):
         build_spec = as_build_spec(build_spec)
         artifact_dir = self.resolve(build_spec.artifact_id)
 
-
         if artifact_dir is None:
             builder = ArtifactBuilder(self, build_spec, extra_env, virtuals, debug=debug)
             artifact_dir = builder.build(config, keep_build)
@@ -388,13 +388,13 @@ class BuildStore(object):
         """
         # try to make shortened dir and symlink to it; incrementally
         # lengthen the name in the case of hash collision
-        vars = dict(name=build_spec.doc['name'])
-        path = pjoin(self.artifact_root, build_spec.short_artifact_id)
+        path = self.get_artifact_path(build_spec.doc['name'], build_spec.digest)
         try:
             os.makedirs(path)
         except OSError, e:
             if e.errno == errno.EEXIST:
-                self._log_artifact_collision(path)
+                self._log_artifact_collision(path, '%s/%s' % (build_spec.doc['name'],
+                                                              build_spec.short_artifact_id))
             raise
         return path
 
@@ -455,9 +455,9 @@ class BuildStore(object):
         # We use base64-encoding of realpath_to_symlink(symlink_target) as the name of the link within gc_roots
         symlink_target = realpath_to_symlink(symlink_target)
         artifact_dir = self.resolve(artifact_id)
-        atomic_symlink(artifact_dir, symlink_target)
+        recursive_symlink(artifact_dir, symlink_target)
         root_name = self._encode_symlink(symlink_target)
-        atomic_symlink(symlink_target, pjoin(self.gc_roots_dir, root_name))
+        recursive_symlink(symlink_target, pjoin(self.gc_roots_dir, root_name))
 
     def remove_symlink_to_artifact(self, symlink_target):
         symlink_target = realpath_to_symlink(symlink_target)
@@ -641,8 +641,10 @@ class ArtifactBuilder(object):
         self.logger.debug('Stop log output to file %s', log_filename)
         log_gz_filename = pjoin(artifact_dir, 'build.log.gz')
         with allow_writes(artifact_dir):
-            gzip_compress(log_filename, log_gz_filename)
+            with allow_writes(log_gz_filename):
+                gzip_compress(log_filename, log_gz_filename)
         write_protect(log_gz_filename)
+
 
 def unpack_sources(logger, source_cache, doc, target_dir):
     """
@@ -653,3 +655,36 @@ def unpack_sources(logger, source_cache, doc, target_dir):
         target = pjoin(target_dir, source_item.get('target', '.'))
         logger.debug('Unpacking sources %s' % key)
         source_cache.unpack(key, target)
+
+class CondaEnvBuilder(ArtifactBuilder):
+    def build(self, config, keep_build):
+        """Override build because we skip making the artifact dir, we only record it"""
+        assert isinstance(config, dict), "caller not refactored"
+        artifact_dir = self.build_store.get_artifact_path(self.build_spec.name, self.build_spec.digest)
+        try:
+            self.build_to(artifact_dir, config, keep_build)
+        except:
+            raise
+        return artifact_dir
+
+    def build_to(self, artifact_dir, config, keep_build):
+        env = dict(self.extra_env)
+        self.run_build_commands(artifact_dir, env, config)
+
+    def run_build_commands(self, artifact_dir, env, config):
+        job_spec = self.build_spec.doc['build']
+
+        with TemporaryDirectory() as tmpdir:
+            log_filename = pjoin(artifact_dir, 'conda_install.log')
+            self.logger.warning('Installing conda packages for %s, follow log with:' % self.build_spec.short_artifact_id)
+            self.logger.warning('  tail -f %s' % log_filename)
+            self.logger.debug('Start log output to file %s', log_filename)
+            if not os.path.isdir(artifact_dir):
+                os.makedirs(artifact_dir)
+            if os.path.exists(log_filename):
+                os.remove(log_filename)
+            with capture_to_file(log_filename):
+                run_job.run_job(self.logger, self.build_store, job_spec,
+                                env, artifact_dir, self.virtuals, cwd=os.getcwd(), config=config,
+                                temp_dir=tmpdir, debug=self.debug)
+            self.logger.debug('Stop log output to file %s', log_filename)

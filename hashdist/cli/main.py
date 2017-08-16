@@ -67,7 +67,7 @@ class HashDistCommandContext(object):
 
     def _ensure_config(self):
         if self._config_filename is None and 'HDIST_CONFIG' in self.env:
-            self._config = json.loads(env['HDIST_CONFIG'])
+            self._config = json.loads(self.env['HDIST_CONFIG'])
         else:
             try:
                 config = load_config_file(self._config_filename, self.logger)

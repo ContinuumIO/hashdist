@@ -133,7 +133,7 @@ class Profile(object):
     Profiles acts as nodes in a tree, with `extends` containing the
     parent profiles (which are child nodes in a DAG).
     """
-    def __init__(self, logger, doc, checkouts_manager):
+    def __init__(self, logger, doc, checkouts_manager, doc_location=None):
         self.logger = logger
         self.doc = doc
         self.parameters = dict(doc.get('parameters', {}))
@@ -141,7 +141,11 @@ class Profile(object):
         self.checkouts_manager = checkouts_manager
         self.hook_import_dirs = doc.get('hook_import_dirs', [])
         self.packages = doc['packages']
+        self.conda_env = doc.get('conda_env', [])
         self._yaml_cache = {} # (filename: [list of documents, possibly with when-clauses])
+        self.doc_location = os.path.splitext(doc_location)[0]
+        if not os.path.isabs(self.doc_location):
+            self.doc_location = os.path.join(os.getcwd(), self.doc_location)
 
     def resolve(self, path):
         """Turn <repo>/path into /tmp/foo-342/path"""
@@ -533,8 +537,10 @@ def load_and_inherit_profile(checkouts, include_doc, cwd=None, override_paramete
             del packages[pkgname]
 
     doc['packages'] = packages
+
+    # MCS: conda env creation should happen somewhere here, I think
     return doc
 
 def load_profile(logger, checkout_manager, profile_file, override_parameters=None):
     doc = load_and_inherit_profile(checkout_manager, profile_file, None, override_parameters)
-    return Profile(logger, doc, checkout_manager)
+    return Profile(logger, doc, checkout_manager, profile_file)

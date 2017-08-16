@@ -85,8 +85,10 @@ For doctesting only, revert back to the nose logging handlers::
     >>> backup_config.restore()
 """
 
+import contextlib
 import logging
 import os
+import sys
 from ansi_color import want_color, color, monochrome
 
 
@@ -428,3 +430,16 @@ class sublevel_added(object):
     def __exit__(self, exc_type, exc_value, traceback):
         if self.filter:
             self.logger.removeFilter(self.filter)
+
+
+@contextlib.contextmanager
+def capture_to_file(path):
+    oldout, olderr = sys.stdout, sys.stderr
+    outfile = open(path, 'wb')
+    try:
+        out = [outfile, outfile]
+        sys.stdout, sys.stderr = out
+        yield out
+    finally:
+        sys.stdout, sys.stderr = oldout, olderr
+        outfile.close()

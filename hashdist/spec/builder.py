@@ -1,10 +1,14 @@
+import os
+import json
 from pprint import pprint
+import subprocess
 from . import package
 from . import utils
 from . import hook
 from . import hook_api
+from .conda_version_matching import conda_match_eval
 from ..formats.marked_yaml import load_yaml_from_file
-from ..core import BuildSpec, ArtifactBuilder
+from ..core import BuildSpec, ArtifactBuilder, CondaEnvBuilder
 from .utils import to_env_var
 from .exceptions import PackageError, ProfileError
 
@@ -25,6 +29,7 @@ class ProfileBuilder(object):
         self._build_specs = {} # { pkgname : BuildSpec }
 
         self._load_packages()
+        self._load_conda_specs()
         self._compute_specs()
 
 
@@ -47,6 +52,8 @@ class ProfileBuilder(object):
         for pkgname in self.profile.packages.keys():
             visit(pkgname)
 
+    def _load_conda_specs(self):
+        self.conda_specs = self.profile.conda_env
 
     def _compute_specs(self):
         """
@@ -84,6 +91,29 @@ class ProfileBuilder(object):
         for pkgname in self._package_specs:
             traverse_depth_first(pkgname)
 
+    def get_conda_status(self):
+        env_path = self.profile.doc_location if os.path.isabs(self.profile.doc_location) else (
+            os.path.join(os.getcwd(), self.profile.doc_location)
+        )
+        try:
+            installed_packages = json.loads(subprocess.check_output(['conda', 'list',
+                                                                     '--json', '-p', env_path]))
+        except subprocess.CalledProcessError:
+            installed_packages = []
+        # for conda, we show the spec, the actual version installed, and
+        #     whether it matches
+        report = {}
+        for spec in self.conda_specs:
+            dummy_obj = type('obj', (object,), {'short_artifact_id' : 'conda spec: ' + spec})
+            # match up this spec with one of the installed packages
+            for pkg in installed_packages[:]:
+                if conda_match_eval(spec, pkg):
+                    report[spec] = (dummy_obj, True)
+                    break
+            if spec not in report:
+                report[spec] = (dummy_obj, False)
+        return report
+
     def get_ready_list(self):
         ready = []
         for name, pkg in self._package_specs.iteritems():
@@ -92,6 +122,9 @@ class ProfileBuilder(object):
             if all(dep_name in self._built for dep_name in pkg.build_deps):
                 ready.append(name)
         return ready
+
+    def get_conda_current(self):
+        return all(pkg[1] for pkg in self.get_conda_status().values())
 
     def get_build_spec(self, pkgname):
         return self._build_specs[pkgname]
@@ -108,6 +141,8 @@ class ProfileBuilder(object):
         """
         report = dict((pkgname, (build_spec, pkgname in self._built))
                       for pkgname, build_spec in self._build_specs.iteritems())
+        if self.conda_specs:
+            report.update(self.get_conda_status())
         return report
 
     def get_profile_build_spec(self, link_type='relative', write_protect=True):
@@ -124,6 +159,7 @@ class ProfileBuilder(object):
                             'id': self._build_specs[pkgname].artifact_id})
 
         commands = []
+
         install_link_rules = []
         for pkgname in sorted_packages:
             pkg = self._package_specs[pkgname]
@@ -139,6 +175,18 @@ class ProfileBuilder(object):
             "version": "n",
             "build": {
                 "import": imports,
+                "commands": commands,
+                }
+            })
+
+    def get_profile_conda_spec(self):
+        commands = []
+        if self.conda_specs:
+            commands.append({'conda_env': [self.profile.doc_location] + self.conda_specs})
+        return BuildSpec({
+            "name": "profile",
+            "version": "n",
+            "build": {
                 "commands": commands,
                 }
             })
@@ -163,6 +211,13 @@ class ProfileBuilder(object):
         virtuals = {}
         builder = ArtifactBuilder(self.build_store, profile_build_spec, extra_env, virtuals, debug)
         builder.build_out(target, config)
+
+    def conda_install(self, config, debug=False):
+        profile_build_spec = self.get_profile_conda_spec()
+        extra_env = {}
+        virtuals = {}
+        builder = CondaEnvBuilder(self.build_store, profile_build_spec, extra_env, virtuals, debug)
+        builder.build(config, keep_build='never')
 
     def _load_package_build_context(self, pkgname, pkgspec):
         hook_files = [self.profile.resolve(fname) for fname in pkgspec.hook_files]

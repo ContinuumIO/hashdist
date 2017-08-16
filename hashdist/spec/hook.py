@@ -57,3 +57,10 @@ def bash_handler(ctx, stage):
         for f in stage['files']:
             ctx.bundle_file(f)
     return stage['bash'].strip().split('\n')
+
+
+def conda_environment_handler(ctx, stage):
+    if 'files' in stage:
+        for f in stage['files']:
+            ctx.bundle_file(f)
+    return stage['conda'].strip().split('\n')

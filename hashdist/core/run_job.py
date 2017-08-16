@@ -484,7 +484,7 @@ class CommandTreeExecution(object):
             command in first group.
         """
         type_keys = ['commands', 'cmd', 'hit', 'set', 'prepend_path', 'append_path',
-                     'prepend_flag', 'append_flag', 'chdir']
+                     'prepend_flag', 'append_flag', 'chdir', 'conda_env']
         type = None
         for t in type_keys:
             if t in node:
@@ -543,21 +543,23 @@ class CommandTreeExecution(object):
     def handle_hit(self, node, env, node_pos):
         self.handle_command_nodes(node, env, node_pos)
 
+    def handle_conda_env(self, node, env, node_pos):
+        self.handle_command_nodes(node, env, node_pos)
+
     def handle_command_nodes(self, node, env, node_pos):
         if not isinstance(node, dict):
             raise TypeError('command node must be a dict; got %r' % node)
-        if sum(['cmd' in node, 'hit' in node, 'commands' in node, 'set' in node]) != 1:
-            raise ValueError("Each script node should have exactly one of the 'cmd', 'hit', 'commands' keys")
+        if sum(['cmd' in node, 'hit' in node, 'commands' in node, 'set' in node, 'conda_env' in node]) != 1:
+            raise ValueError("Each script node should have exactly one of the 'cmd', 'hit', 'commands', 'conda_env' keys")
         if sum(['to_var' in node, 'stdout_to_file' in node]) > 1:
             raise ValueError("Can only have one of to_var, stdout_to_file")
         if 'commands' in node and ('append_to_file' in node or 'to_var' in node or 'inputs' in node):
             raise ValueError('"commands" not compatible with to_var or append_to_file or inputs')
 
-
         # Make scopes
         node_env = dict(env)
 
-        if 'cmd' in node or 'hit' in node:
+        if any(thing in node for thing in ('cmd', 'hit', 'conda_env')):
             inputs = node.get('inputs', ())
             node_env.update(self.dump_inputs(inputs, node_pos))
             if 'cmd' in node:
@@ -565,6 +567,11 @@ class CommandTreeExecution(object):
                 args = node['cmd']
                 func = self.run_cmd
                 debug_func = self.debug_call
+            elif 'conda_env' in node:
+                key = 'conda_env'
+                args = node['conda_env']
+                func = self.run_conda_create_or_install
+                debug_func = func
             else:
                 key = 'hit'
                 args = node['hit']
@@ -625,6 +632,30 @@ class CommandTreeExecution(object):
         except subprocess.CalledProcessError, e:
             logger.error("command failed (code=%d); raising" % e.returncode)
             raise
+
+    def run_conda_create_or_install(self, args, env, stdout_to=None):
+        '''Run ``conda create`` or ``conda install`` in a separate process'''
+        logger = self.logger
+        logger.info('running %r' % args)
+        old_stdout = sys.stdout
+        with suppress_log_info('package'):
+            if stdout_to is not None:
+                sys.stdout = stdout_to
+            # args[0] is the env path
+            if os.path.isdir(os.path.join(args[0], 'conda-meta')):
+                subcommand = 'install'
+            else:
+                subcommand = 'create'
+            try:
+                # we run conda with subprocess because importing it is too
+                #    constraining - it must be in the active env, which for
+                #    miniconda/anaconda must be the root env. In terms
+                #    of having hashdist installable to any env, subprocess
+                #    gives us a lot more flexibility.
+                retcode = subprocess.check_call(['conda', subcommand, '-yqp',] + args,
+                                                stdout=sys.stdout, stderr=sys.stderr)
+            finally:
+                sys.stdout = old_stdout
 
     def run_hit(self, args, env, stdout_to=None):
         """

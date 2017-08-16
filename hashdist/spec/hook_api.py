@@ -14,7 +14,8 @@ from .exceptions import ProfileError, IllegalHookFileError
 class PackageBuildContext(object):
     def __init__(self, package_name, dependency_dir_vars, parameters):
         import hook
-        self._build_stage_handlers = {'bash': hook.bash_handler}
+        self._build_stage_handlers = {'bash': hook.bash_handler,
+                                      'conda': hook.conda_environment_handler}
         self._modules = []
         self._bundled_files = {}
 
